@@ -70,7 +70,7 @@ class MQTTHandler:
                 print("🔹 Stopping MQTT client...")
                 try:
                     self.remove_global_discovery()
-                except:
+                except Exception:
                     pass
                 self.client.loop_stop()
                 self.client.disconnect()

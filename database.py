@@ -80,111 +80,131 @@ def init_db():
         row = cursor.fetchone()
         current_version = row['version'] if row['version'] else 0
         
-        # Migration 1: Add hass_entity_id column if not exists
-        if current_version < 1:
-            cursor = conn.execute("PRAGMA table_info(services)")
-            columns = [row[1] for row in cursor.fetchall()]
-            if 'hass_entity_id' not in columns:
-                conn.execute("ALTER TABLE services ADD COLUMN hass_entity_id TEXT")
-            conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+        # Wrap all migrations in a transaction for atomicity
+        conn.execute("BEGIN IMMEDIATE")
         
-        # Migration 2: Add onboarding_completed column to users table
-        if current_version < 2:
-            cursor = conn.execute("PRAGMA table_info(users)")
-            columns = [row[1] for row in cursor.fetchall()]
-            if 'onboarding_completed' not in columns:
-                conn.execute("ALTER TABLE users ADD COLUMN onboarding_completed INTEGER DEFAULT 0")
-            conn.execute("INSERT INTO schema_version (version) VALUES (2)")
-        
-        # Migration 3: Create api_keys table
-        if current_version < 3:
-            # Check if table exists
-            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'")
-            if not cursor.fetchone():
-                conn.execute("""
-                    CREATE TABLE api_keys (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER NOT NULL,
-                        key_hash TEXT NOT NULL UNIQUE,
-                        name TEXT NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        last_used_at TIMESTAMP,
-                        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-                    )
-                """)
-            conn.execute("INSERT INTO schema_version (version) VALUES (3)")
-        
-        # Migration 4: Add current_port column to services table
-        if current_version < 4:
-            cursor = conn.execute("PRAGMA table_info(services)")
-            columns = [row[1] for row in cursor.fetchall()]
-            if 'current_port' not in columns:
-                conn.execute("ALTER TABLE services ADD COLUMN current_port INTEGER")
-            conn.execute("INSERT INTO schema_version (version) VALUES (4)")
-        
-        # Migration 5: Add password_hash column to users table
-        if current_version < 5:
-            cursor = conn.execute("PRAGMA table_info(users)")
-            columns = [row[1] for row in cursor.fetchall()]
-            if 'password_hash' not in columns:
-                conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
-            conn.execute("INSERT INTO schema_version (version) VALUES (5)")
-        
-        # Migration 6: Add totp_secret column to users table
-        if current_version < 6:
-            cursor = conn.execute("PRAGMA table_info(users)")
-            columns = [row[1] for row in cursor.fetchall()]
-            if 'totp_secret' not in columns:
-                conn.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
-            conn.execute("INSERT INTO schema_version (version) VALUES (6)")
-        
-        # Migration 7: Create recovery_codes table
-        if current_version < 7:
-            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recovery_codes'")
-            if not cursor.fetchone():
-                conn.execute("""
-                    CREATE TABLE recovery_codes (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER NOT NULL,
-                        code_hash TEXT NOT NULL,
-                        used INTEGER DEFAULT 0,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-                    )
-                """)
-            conn.execute("INSERT INTO schema_version (version) VALUES (7)")
-        
-        # Migration 8: Add random_suffix column to services table
-        if current_version < 8:
-            cursor = conn.execute("PRAGMA table_info(services)")
-            columns = [row[1] for row in cursor.fetchall()]
-            if 'random_suffix' not in columns:
-                conn.execute("ALTER TABLE services ADD COLUMN random_suffix INTEGER DEFAULT 1")
-            conn.execute("INSERT INTO schema_version (version) VALUES (8)")
-        
-        # Migration 9: Add show_regex column to services table
-        if current_version < 9:
-            cursor = conn.execute("PRAGMA table_info(services)")
-            columns = [row[1] for row in cursor.fetchall()]
-            if 'show_regex' not in columns:
-                conn.execute("ALTER TABLE services ADD COLUMN show_regex INTEGER DEFAULT 1")
-            conn.execute("INSERT INTO schema_version (version) VALUES (9)")
-        
-        # Migration 10: Add routing_mode column to services table
-        if current_version < 10:
-            cursor = conn.execute("PRAGMA table_info(services)")
-            columns = [row[1] for row in cursor.fetchall()]
-            if 'routing_mode' not in columns:
-                conn.execute("ALTER TABLE services ADD COLUMN routing_mode TEXT DEFAULT 'unifi'")
-            conn.execute("INSERT INTO schema_version (version) VALUES (10)")
-        
-        conn.commit()
+        try:
+            # Migration 1: Add hass_entity_id column if not exists
+            if current_version < 1:
+                cursor = conn.execute("PRAGMA table_info(services)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'hass_entity_id' not in columns:
+                    conn.execute("ALTER TABLE services ADD COLUMN hass_entity_id TEXT")
+                conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+            
+            # Migration 2: Add onboarding_completed column to users table
+            if current_version < 2:
+                cursor = conn.execute("PRAGMA table_info(users)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'onboarding_completed' not in columns:
+                    conn.execute("ALTER TABLE users ADD COLUMN onboarding_completed INTEGER DEFAULT 0")
+                conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+            
+            # Migration 3: Create api_keys table
+            if current_version < 3:
+                cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'")
+                if not cursor.fetchone():
+                    conn.execute("""
+                        CREATE TABLE api_keys (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id INTEGER NOT NULL,
+                            key_hash TEXT NOT NULL UNIQUE,
+                            name TEXT NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_used_at TIMESTAMP,
+                            FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+                        )
+                    """)
+                conn.execute("INSERT INTO schema_version (version) VALUES (3)")
+            
+            # Migration 4: Add current_port column to services table
+            if current_version < 4:
+                cursor = conn.execute("PRAGMA table_info(services)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'current_port' not in columns:
+                    conn.execute("ALTER TABLE services ADD COLUMN current_port INTEGER")
+                conn.execute("INSERT INTO schema_version (version) VALUES (4)")
+            
+            # Migration 5: Add password_hash column to users table
+            if current_version < 5:
+                cursor = conn.execute("PRAGMA table_info(users)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'password_hash' not in columns:
+                    conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+                conn.execute("INSERT INTO schema_version (version) VALUES (5)")
+            
+            # Migration 6: Add totp_secret column to users table
+            if current_version < 6:
+                cursor = conn.execute("PRAGMA table_info(users)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'totp_secret' not in columns:
+                    conn.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
+                conn.execute("INSERT INTO schema_version (version) VALUES (6)")
+            
+            # Migration 7: Create recovery_codes table
+            if current_version < 7:
+                cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recovery_codes'")
+                if not cursor.fetchone():
+                    conn.execute("""
+                        CREATE TABLE recovery_codes (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id INTEGER NOT NULL,
+                            code_hash TEXT NOT NULL,
+                            used INTEGER DEFAULT 0,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+                        )
+                    """)
+                conn.execute("INSERT INTO schema_version (version) VALUES (7)")
+            
+            # Migration 8: Add random_suffix column to services table
+            if current_version < 8:
+                cursor = conn.execute("PRAGMA table_info(services)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'random_suffix' not in columns:
+                    conn.execute("ALTER TABLE services ADD COLUMN random_suffix INTEGER DEFAULT 1")
+                conn.execute("INSERT INTO schema_version (version) VALUES (8)")
+            
+            # Migration 9: Add show_regex column to services table
+            if current_version < 9:
+                cursor = conn.execute("PRAGMA table_info(services)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'show_regex' not in columns:
+                    conn.execute("ALTER TABLE services ADD COLUMN show_regex INTEGER DEFAULT 1")
+                conn.execute("INSERT INTO schema_version (version) VALUES (9)")
+            
+            # Migration 10: Add routing_mode column to services table
+            if current_version < 10:
+                cursor = conn.execute("PRAGMA table_info(services)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'routing_mode' not in columns:
+                    conn.execute("ALTER TABLE services ADD COLUMN routing_mode TEXT DEFAULT 'unifi'")
+                conn.execute("INSERT INTO schema_version (version) VALUES (10)")
+            
+            # Migration 11: Initialize ENFORCE_2FA setting with default value
+            if current_version < 11:
+                cursor = conn.execute("SELECT key FROM settings WHERE key = 'ENFORCE_2FA'")
+                if not cursor.fetchone():
+                    conn.execute("INSERT INTO settings (key, value) VALUES ('ENFORCE_2FA', '0')")
+                conn.execute("INSERT INTO schema_version (version) VALUES (11)")
+            
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+def _configure_connection(conn):
+    """Apply standard pragmas to a new SQLite connection."""
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
 
 @contextmanager
 def get_db():
     """Context manager for database connections."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
+    _configure_connection(conn)
     try:
         yield conn
     finally:

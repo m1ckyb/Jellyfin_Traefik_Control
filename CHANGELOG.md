@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-07-19
+
+### Security
+- Authentication: Added whitelist IP check on `/api/settings` and `/api/settings/restore` endpoints.
+- Authentication: Added Redis-backed rate limiting on `/auth/login/2fa` (5 attempts/5 min), `/auth/register/begin`, and `/auth/login/begin` (10 per minute per IP).
+- Authentication: Added password complexity requirements (upper, lower, number, special character).
+- Authentication: Added re-authentication requirement (password) before disabling 2FA.
+- Authentication: Removed plaintext password logging from `/api/users/<username>/reset-password`.
+- Config: Removed `chmod 777` from entrypoint; secrets and database now use `chmod 600`/`chmod 700`.
+- Config: Secret key file created with restrictive permissions (`0o600`).
+- Session: Enabled `HttpOnly`, `SameSite=Lax`, and `Secure` (when not debug) cookie flags.
+- Session: Set `PERMANENT_SESSION_LIFETIME` to 24 hours.
+- SSH: Changed host key verification from `AutoAddPolicy` to `WarningPolicy` with system known_hosts fallback.
+- UniFi: Made TLS verification configurable via `UNIFI_VERIFY_SSL` setting.
+- Replaced `random` module with `secrets` for all random generation.
+- Added security headers: `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`.
+
+### Changed
+- Database: Enabled WAL journal mode for concurrent read/write performance.
+- Database: Added connection timeouts, busy timeouts, and `check_same_thread=False` for SQLite.
+- Database: Enforced foreign keys via `PRAGMA foreign_keys = ON` on every connection.
+- Database: Wrapped all migrations in `BEGIN IMMEDIATE` / `COMMIT` transactions with rollback on failure.
+- Database: Added migration 11 to initialize `ENFORCE_2FA` setting default.
+- Redis: Added connection pooling with automatic config-change detection, `retry_on_timeout`, and explicit timeouts.
+- Cloudflare: Added configurable request timeout (15s default) to `cf_request()`.
+- Threading: Added `RLock` around `turn_on_service`, `turn_off_service`, and `rotate_firewall_port` to prevent race conditions.
+- Threading: Added `Lock` around all shared caches (`UNIFI_STATUS_CACHE`, `HEALTH_STATUS_CACHE`, `_public_ip_cache`).
+- Graceful Shutdown: Added signal handler for `SIGTERM`/`SIGINT` that sets a shutdown event; all background loops now exit cleanly.
+- Networking: Added public IP caching (5-minute TTL) with lock-based thread safety.
+- Logging: Replaced all bare `except:` clauses across `main.py`, `routing.py`, and `mqtt_handler.py` with specific exception types.
+
 ## [0.1.2] - 2026-05-17
 
 ### Added

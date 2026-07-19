@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import redis
 import requests
-import random
 import threading
+import signal
 import string
 import os
 import sys
@@ -62,11 +62,11 @@ class Tee(object):
             try:
                 f.write(obj)
                 f.flush()
-            except: pass
+            except Exception: pass
     def flush(self):
         for f in self.files:
             try: f.flush()
-            except: pass
+            except Exception: pass
 
 LOG_FILE = os.path.join(DATA_DIR, 'app.log')
 # Truncate log file on startup and redirect stdout/stderr
@@ -405,43 +405,100 @@ def validate_target_url(url):
         raise ValueError(f"Invalid URL: {str(e)}")
 
 # ================= HELPER FUNCTIONS =================
+
+# Locks for thread safety
+_cache_lock = threading.Lock()
+_service_ops_lock = threading.RLock()  # RLock because rotate_service calls turn_off + turn_on
+_shutdown_event = threading.Event()
+
+def request_shutdown(signum=None, frame=None):
+    """Signal handler for graceful shutdown."""
+    print("🛑 Shutdown signal received, stopping background threads...")
+    _shutdown_event.set()
+
+def get_unifi_verify_ssl():
+    """Check if UniFi TLS verification is enabled. Default: False for self-signed certs."""
+    return get_setting('UNIFI_VERIFY_SSL', '0') == '1'
+
+_redis_client = None
+_redis_config_hash = None
+
 def get_redis():
+    """Get a Redis connection with automatic retry and config-change detection."""
+    global _redis_client, _redis_config_hash
     try:
         redis_host = get_setting("REDIS_HOST")
         if not redis_host:
-            print("⚠️ Redis not configured")
             return None
-        
-        redis_port = int(get_setting("REDIS_PORT", required=False) or "6379")
+
+        redis_port_str = get_setting("REDIS_PORT", required=False)
+        redis_port = int(redis_port_str) if redis_port_str else 6379
         redis_pass = get_setting("REDIS_PASS", required=False)
-        
-        return redis.Redis(
-            host=redis_host, 
-            port=redis_port, 
-            password=redis_pass if redis_pass else None, 
-            decode_responses=True
+
+        config_key = f"{redis_host}:{redis_port}:{redis_pass or ''}"
+        if _redis_client and _redis_config_hash == config_key:
+            try:
+                _redis_client.ping()
+                return _redis_client
+            except redis.ConnectionError:
+                pass
+
+        client = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            password=redis_pass if redis_pass else None,
+            decode_responses=True,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+            retry_on_timeout=True,
         )
+        client.ping()
+        _redis_client = client
+        _redis_config_hash = config_key
+        return client
     except Exception as e:
         print(f"❌ Redis Connection Error: {e}")
+        _redis_client = None
+        _redis_config_hash = None
         return None
 
+_public_ip_cache = {"ip": None, "timestamp": 0}
+_PUBLIC_IP_CACHE_TTL = 300  # 5 minutes
+
 def get_public_ip():
+    """Get the public IP, cached for 5 minutes to avoid repeated lookups."""
+    now = time.time()
+    with _cache_lock:
+        if _public_ip_cache["ip"] and now - _public_ip_cache["timestamp"] < _PUBLIC_IP_CACHE_TTL:
+            return _public_ip_cache["ip"]
     try:
-        return requests.get("https://api.ipify.org", timeout=5).text
-    except:
-        return "Unknown"
+        ip = requests.get("https://api.ipify.org", timeout=5).text
+        with _cache_lock:
+            _public_ip_cache["ip"] = ip
+            _public_ip_cache["timestamp"] = now
+        return ip
+    except (requests.RequestException, ValueError) as e:
+        print(f"⚠️ Failed to get public IP: {e}")
+        with _cache_lock:
+            return _public_ip_cache["ip"] or "Unknown"
 
 # Rate limiting storage
 LOGIN_ATTEMPTS = {}
 
 def check_rate_limit(ip_address, limit=5, window=60):
-    """Simple in-memory rate limiting."""
+    """Simple in-memory rate limiting (fallback when Redis unavailable)."""
     current_time = time.time()
     if ip_address not in LOGIN_ATTEMPTS:
         LOGIN_ATTEMPTS[ip_address] = []
     
     # Filter out timestamps older than the window
     LOGIN_ATTEMPTS[ip_address] = [t for t in LOGIN_ATTEMPTS[ip_address] if current_time - t < window]
+    
+    # Evict stale IPs to prevent memory leak (keep at most 10000 entries)
+    if len(LOGIN_ATTEMPTS) > 10000:
+        stale_ips = [ip for ip, ts in LOGIN_ATTEMPTS.items() if not ts]
+        for ip in stale_ips[:5000]:
+            del LOGIN_ATTEMPTS[ip]
     
     # Check if limit reached
     if len(LOGIN_ATTEMPTS[ip_address]) >= limit:
@@ -450,6 +507,50 @@ def check_rate_limit(ip_address, limit=5, window=60):
     # Add current attempt
     LOGIN_ATTEMPTS[ip_address].append(current_time)
     return True
+
+def check_rate_limit_redis(key_prefix, identifier, limit=5, window=60):
+    """Redis-backed rate limiting. Falls back to in-memory if Redis unavailable."""
+    r = get_redis()
+    if r is None:
+        # Fallback to in-memory for the specific key
+        return check_rate_limit(f"{key_prefix}:{identifier}", limit, window)
+    
+    try:
+        key = f"rate_limit:{key_prefix}:{identifier}"
+        pipe = r.pipeline()
+        now = time.time()
+        window_start = now - window
+        
+        # Remove expired entries
+        pipe.zremrangebyscore(key, 0, window_start)
+        # Count current entries
+        pipe.zcard(key)
+        # Add current attempt
+        pipe.zadd(key, {str(now): now})
+        # Set expiry on the key
+        pipe.expire(key, window)
+        
+        results = pipe.execute()
+        current_count = results[1]
+        
+        if current_count >= limit:
+            # Remove the attempt we just added since we're over limit
+            pipe.zrem(key, str(now))
+            pipe.execute()
+            return False
+        
+        return True
+    except Exception as e:
+        print(f"⚠️ Redis rate limit error: {e}, falling back to in-memory")
+        return check_rate_limit(f"{key_prefix}:{identifier}", limit, window)
+
+def check_2fa_rate_limit(identifier, limit=5, window=300):
+    """Rate limit for 2FA verification (5 attempts per 5 minutes)."""
+    return check_rate_limit_redis("2fa", identifier, limit, window)
+
+def check_webauthn_rate_limit(identifier, limit=10, window=60):
+    """Rate limit for WebAuthn operations (10 attempts per minute)."""
+    return check_rate_limit_redis("webauthn", identifier, limit, window)
 
 def check_port_open(port, session=None, base_url=None):
     """
@@ -536,20 +637,20 @@ def generate_random_port():
     
     max_attempts = 1000
     for _ in range(max_attempts):
-        port = random.randint(1024, 65535)
+        port = secrets.randbelow(65536 - 1024) + 1024
         if port not in RESERVED_PORTS and port not in ports_in_use:
             return port
     
     # Fallback: try to find a port in a safe range that avoids both reserved and in-use ports
     # Using higher port range which has fewer common services
     for _ in range(max_attempts):
-        port = random.randint(49152, 65535)  # Dynamic/Private port range
+        port = secrets.randbelow(65536 - 49152) + 49152
         if port not in RESERVED_PORTS and port not in ports_in_use:
             return port
     
     # Ultimate fallback (should never reach here given 64k port space)
     # Return a port in the dynamic range, even if it might be reserved
-    return random.randint(49152, 65535)
+    return secrets.randbelow(65536 - 49152) + 49152
 
 def count_active_routers():
     """Counts how many Traefik routers are currently active in Redis."""
@@ -557,7 +658,7 @@ def count_active_routers():
     keys = r.keys("traefik/http/routers/*/rule")
     return len(keys)
 
-def cf_request(method, endpoint, data=None):
+def cf_request(method, endpoint, data=None, timeout=15):
     cf_token = get_setting("CF_API_TOKEN")
     cf_zone_id = get_setting("CF_ZONE_ID")
     
@@ -570,7 +671,7 @@ def cf_request(method, endpoint, data=None):
         "Content-Type": "application/json"
     }
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/{endpoint}"
-    response = requests.request(method, url, headers=headers, json=data)
+    response = requests.request(method, url, headers=headers, json=data, timeout=timeout)
     if not response.ok:
         print(f"❌ Cloudflare Error ({endpoint}): {response.text}")
         return None
@@ -607,12 +708,13 @@ UNIFI_STATUS_CACHE = {
 }
 
 def invalidate_unifi_cache():
-    UNIFI_STATUS_CACHE["timestamp"] = 0
+    with _cache_lock:
+        UNIFI_STATUS_CACHE["timestamp"] = 0
 
 def logout_unifi(session, base_url):
     try:
         session.post(f"{base_url}/api/auth/logout", timeout=2)
-    except:
+    except Exception:
         pass
 
 def unifi_request(session, method, url, **kwargs):
@@ -685,7 +787,7 @@ def sync_unifi_groups(session=None, base_url=None):
                         try:
                             if ipaddress.ip_address(ip) in ipaddress.ip_network(traefik_lan):
                                 in_lan = True
-                        except:
+                        except (ValueError, TypeError):
                             pass
                     
                     if not in_lan:
@@ -706,7 +808,7 @@ def sync_unifi_groups(session=None, base_url=None):
             
         base_url = f"https://{unifi_host}"
         session = requests.Session()
-        session.verify = False
+        session.verify = get_unifi_verify_ssl()
         own_session = True
     
     try:
@@ -979,8 +1081,9 @@ def check_unifi_rule(session=None, base_url=None):
         return None
     
     # Check cache first
-    if time.time() - UNIFI_STATUS_CACHE["timestamp"] < UNIFI_STATUS_CACHE["ttl"]:
-        return UNIFI_STATUS_CACHE["data"]
+    with _cache_lock:
+        if time.time() - UNIFI_STATUS_CACHE["timestamp"] < UNIFI_STATUS_CACHE["ttl"]:
+            return UNIFI_STATUS_CACHE["data"]
     
     unifi_rule_name = get_setting("UNIFI_RULE_NAME", required=False)
     
@@ -996,7 +1099,7 @@ def check_unifi_rule(session=None, base_url=None):
             return None
         base_url = f"https://{unifi_host}"
         session = requests.Session()
-        session.verify = False
+        session.verify = get_unifi_verify_ssl()
         own_session = True
 
     try:
@@ -1029,8 +1132,9 @@ def check_unifi_rule(session=None, base_url=None):
             }
             
             # Update cache
-            UNIFI_STATUS_CACHE["data"] = result
-            UNIFI_STATUS_CACHE["timestamp"] = time.time()
+            with _cache_lock:
+                UNIFI_STATUS_CACHE["data"] = result
+                UNIFI_STATUS_CACHE["timestamp"] = time.time()
             return result
         
     except Exception:
@@ -1074,7 +1178,7 @@ def toggle_unifi(enable_rule, forward_port=None, session=None, base_url=None):
             
         base_url = f"https://{unifi_host}"
         session = requests.Session()
-        session.verify = False
+        session.verify = get_unifi_verify_ssl()
         own_session = True
         print(f"🔹 Connecting to UniFi Controller ({unifi_host})...")
 
@@ -1162,7 +1266,7 @@ def check_service_health(target_url, timeout=None):
             
         requests.get(target_url, timeout=timeout, verify=False)
         return True
-    except:
+    except (requests.RequestException, ValueError):
         return False
 
 # Global cache for health status
@@ -1208,35 +1312,36 @@ def perform_health_check():
     """Perform a single health check iteration."""
     try:
         timeout = int(get_setting("HEALTH_CHECK_TIMEOUT", required=False) or 1)
-    except:
+    except (ValueError, TypeError):
         timeout = 1
         
     try:
         # Use a new connection for the thread/request
         services = db.get_all_services()
-        for service in services:
-            if service['enabled']:
-                is_healthy = check_service_health(service['target_url'], timeout=timeout)
-                
-                # Check for status change
-                prev_healthy = HEALTH_STATUS_CACHE.get(service['id'])
-                
-                # Only notify if we had a previous status (to avoid startup spam) 
-                # AND the status has changed
-                if prev_healthy is not None and prev_healthy != is_healthy:
-                    if is_healthy:
-                        send_discord_notification(f"✅ Service **{service['name']}** is back ONLINE.", title="Health Alert: Recovered", color=0x2ecc71, msg_type='health')
-                    else:
-                        send_discord_notification(f"⚠️ Service **{service['name']}** is UNHEALTHY.", title="Health Alert: Failure", color=0xe74c3c, msg_type='health')
+        with _cache_lock:
+            for service in services:
+                if service['enabled']:
+                    is_healthy = check_service_health(service['target_url'], timeout=timeout)
                     
-                    # Update MQTT on health change
-                    mqtt_manager.publish_state(service, True, healthy=is_healthy)
-                
-                HEALTH_STATUS_CACHE[service['id']] = is_healthy
-            else:
-                # Remove from cache if disabled
-                if service['id'] in HEALTH_STATUS_CACHE:
-                    del HEALTH_STATUS_CACHE[service['id']]
+                    # Check for status change
+                    prev_healthy = HEALTH_STATUS_CACHE.get(service['id'])
+                    
+                    # Only notify if we had a previous status (to avoid startup spam) 
+                    # AND the status has changed
+                    if prev_healthy is not None and prev_healthy != is_healthy:
+                        if is_healthy:
+                            send_discord_notification(f"✅ Service **{service['name']}** is back ONLINE.", title="Health Alert: Recovered", color=0x2ecc71, msg_type='health')
+                        else:
+                            send_discord_notification(f"⚠️ Service **{service['name']}** is UNHEALTHY.", title="Health Alert: Failure", color=0xe74c3c, msg_type='health')
+                        
+                        # Update MQTT on health change
+                        mqtt_manager.publish_state(service, True, healthy=is_healthy)
+                    
+                    HEALTH_STATUS_CACHE[service['id']] = is_healthy
+                else:
+                    # Remove from cache if disabled
+                    if service['id'] in HEALTH_STATUS_CACHE:
+                        del HEALTH_STATUS_CACHE[service['id']]
         return True
     except Exception as e:
         print(f"⚠️ Health check error: {e}")
@@ -1245,17 +1350,17 @@ def perform_health_check():
 def health_check_loop():
     """Background loop to check service health periodically."""
     print("🔹 Starting background health check service...")
-    while True:
+    while not _shutdown_event.is_set():
         try:
             interval = int(get_setting("HEALTH_CHECK_INTERVAL", required=False) or 60)
-        except:
+        except (ValueError, TypeError):
             interval = 60
             
         if interval < 10: interval = 10
         
         perform_health_check()
         
-        time.sleep(interval)
+        _shutdown_event.wait(timeout=interval)
 
 def start_health_check_thread():
     thread = threading.Thread(target=health_check_loop, daemon=True)
@@ -1264,7 +1369,7 @@ def start_health_check_thread():
 def port_rotation_loop():
     """Background loop to rotate firewall port periodically."""
     print("🔹 Starting background port rotation service...")
-    while True:
+    while not _shutdown_event.is_set():
         try:
             interval_mins = int(get_setting("PORT_ROTATION_INTERVAL", required=False) or 0)
             if interval_mins > 0:
@@ -1272,12 +1377,12 @@ def port_rotation_loop():
                 services = db.get_all_services()
                 if any(s['enabled'] for s in services):
                     rotate_firewall_port()
-                time.sleep(interval_mins * 60)
+                _shutdown_event.wait(timeout=interval_mins * 60)
             else:
-                time.sleep(60) # Check setting again in a minute
+                _shutdown_event.wait(timeout=60)
         except Exception as e:
             print(f"⚠️ Port rotation error: {e}")
-            time.sleep(60)
+            _shutdown_event.wait(timeout=60)
 
 def start_port_rotation_thread():
     thread = threading.Thread(target=port_rotation_loop, daemon=True)
@@ -1375,12 +1480,16 @@ def get_service_status(service_id):
         }
 
 def turn_off_service(service_id, actor=None, quiet=False, skip_unifi=False):
-    """Turn off a specific service"""
+    """Turn off a specific service. Uses _service_ops_lock to serialize concurrent operations."""
     service = db.get_service(service_id)
     if not service:
         return {"error": "Service not found"}
     
-    # Identify the actor (WebUI user, API Key, or Background Task)
+    with _service_ops_lock:
+        return _turn_off_service_inner(service, actor=actor, quiet=quiet, skip_unifi=skip_unifi)
+
+def _turn_off_service_inner(service, actor=None, quiet=False, skip_unifi=False):
+    service_id = service['id']
     if not actor:
         if has_request_context() and hasattr(g, 'actor'):
             actor = g.actor
@@ -1422,7 +1531,7 @@ def turn_off_service(service_id, actor=None, quiet=False, skip_unifi=False):
         if all([unifi_host, unifi_user, unifi_pass]):
             unifi_base_url = f"https://{unifi_host}"
             unifi_session = requests.Session()
-            unifi_session.verify = False
+            unifi_session.verify = get_unifi_verify_ssl()
             print(f"🔹 Connecting to UniFi Controller ({unifi_host})...")
             resp = login_unifi_with_retry(unifi_session, unifi_base_url, unifi_user, unifi_pass)
             if resp and resp.status_code == 200:
@@ -1535,7 +1644,12 @@ def rotate_firewall_port(actor=None):
     """
     Rotates the external firewall port for all active services without restarting them.
     Updates UniFi Port Forward and Cloudflare Origin Rule.
+    Uses _service_ops_lock to serialize concurrent operations.
     """
+    with _service_ops_lock:
+        return _rotate_firewall_port_inner(actor=actor)
+
+def _rotate_firewall_port_inner(actor=None):
     print(f"\n🔄 === ({actor if actor else 'System'}) ROTATING FIREWALL PORT ===")
     
     # 1. Check for active services
@@ -1560,7 +1674,7 @@ def rotate_firewall_port(actor=None):
     if all([unifi_host, unifi_user, unifi_pass]):
         unifi_base_url = f"https://{unifi_host}"
         unifi_session = requests.Session()
-        unifi_session.verify = False
+        unifi_session.verify = get_unifi_verify_ssl()
         resp = login_unifi_with_retry(unifi_session, unifi_base_url, unifi_user, unifi_pass)
         if resp and resp.status_code == 200:
             csrf_token = resp.headers.get("x-csrf-token")
@@ -1614,12 +1728,16 @@ def rotate_firewall_port(actor=None):
     return {"success": True, "port": new_port}
 
 def turn_on_service(service_id, force=False, actor=None, preferred_port=None, quiet=False, skip_unifi=False):
-    """Turn on a specific service"""
+    """Turn on a specific service. Uses _service_ops_lock to serialize concurrent operations."""
     service = db.get_service(service_id)
     if not service:
         return {"error": "Service not found"}
     
-    # Identify the actor (WebUI user, API Key, or Background Task)
+    with _service_ops_lock:
+        return _turn_on_service_inner(service, force=force, actor=actor, preferred_port=preferred_port, quiet=quiet, skip_unifi=skip_unifi)
+
+def _turn_on_service_inner(service, force=False, actor=None, preferred_port=None, quiet=False, skip_unifi=False):
+    service_id = service['id']
     if not actor:
         if has_request_context() and hasattr(g, 'actor'):
             actor = g.actor
@@ -1700,7 +1818,7 @@ def turn_on_service(service_id, force=False, actor=None, preferred_port=None, qu
         if all([unifi_host, unifi_user, unifi_pass]):
             unifi_base_url = f"https://{unifi_host}"
             unifi_session = requests.Session()
-            unifi_session.verify = False
+            unifi_session.verify = get_unifi_verify_ssl()
             print(f"🔹 Connecting to UniFi Controller ({unifi_host})...")
             resp = login_unifi_with_retry(unifi_session, unifi_base_url, unifi_user, unifi_pass)
             if resp and resp.status_code == 200:
@@ -1735,7 +1853,7 @@ def turn_on_service(service_id, force=False, actor=None, preferred_port=None, qu
         return {"error": "DOMAIN_ROOT not configured"}
     
     if service.get('random_suffix', 1):
-        random_part = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        random_part = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
         new_subdomain = f"{service['subdomain_prefix']}-{random_part}"
     else:
         new_subdomain = service['subdomain_prefix']
@@ -1946,6 +2064,15 @@ app = Flask(__name__)
 app.config['WTF_CSRF_CHECK_DEFAULT'] = False # We will manually check to exempt API keys
 csrf = CSRFProtect(app)
 
+# Session security configuration
+from datetime import timedelta
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+# SESSION_COOKIE_SECURE enabled when not in debug mode (requires HTTPS)
+if not app.debug:
+    app.config['SESSION_COOKIE_SECURE'] = True
+
 @app.before_request
 def check_csrf_protection():
     """Enforce CSRF protection globally, but exempt API key requests."""
@@ -1964,6 +2091,26 @@ def check_csrf_protection():
         # Enforce CSRF
         csrf.protect()
 
+@app.after_request
+def add_security_headers(response):
+    """Add security headers to all responses."""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
+    # CSP: allow inline scripts (required by Flask-WTF and the existing templates)
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'"
+    )
+    return response
+
 # Use persistent secret key from environment or generate one and store it
 SECRET_KEY_FILE = os.path.join(DATA_DIR, '.secret_key')
 if os.path.exists(SECRET_KEY_FILE):
@@ -1973,6 +2120,11 @@ else:
     app.secret_key = os.urandom(24)
     with open(SECRET_KEY_FILE, 'wb') as f:
         f.write(app.secret_key)
+    # Lock down permissions on the secret key file
+    try:
+        os.chmod(SECRET_KEY_FILE, 0o600)
+    except OSError:
+        pass
 
 # Track application startup time for initial setup window
 STARTUP_TIME = time.time()
@@ -2154,6 +2306,10 @@ def register_begin():
     if db.count_users() == 0 and not is_in_setup_window():
         return jsonify({"error": "Setup window expired. Please restart the application."}), 410
     
+    # Rate limit: 10 attempts per minute per IP for WebAuthn
+    if not check_webauthn_rate_limit(request.remote_addr):
+        return jsonify({"error": "Too many attempts. Please try again later."}), 429
+    
     data = request.json
     username = data.get('username')
     
@@ -2167,7 +2323,7 @@ def register_begin():
     
     # Generate temporary user ID for this registration attempt
     # We'll create the actual user only after successful verification
-    temp_user_id = random.randint(1000000, 9999999)
+    temp_user_id = secrets.randbelow(9000000) + 1000000
     user_id_bytes = temp_user_id.to_bytes(4, byteorder='big')
     
     # Get dynamic RP_ID and origin for this request
@@ -2272,6 +2428,10 @@ def login_begin():
     
     if not username:
         return jsonify({"error": "Username required"}), 400
+    
+    # Rate limit: 10 attempts per minute per IP for WebAuthn
+    if not check_webauthn_rate_limit(request.remote_addr):
+        return jsonify({"error": "Too many attempts. Please try again later."}), 429
     
     # Check if user exists
     user = db.get_user_by_username(username)
@@ -2446,6 +2606,10 @@ def login_2fa():
     if not user_id:
         return jsonify({"error": "Session expired, please login again"}), 400
         
+    # Rate limit: 5 attempts per 5 minutes per user
+    if not check_2fa_rate_limit(str(user_id)):
+        return jsonify({"error": "Too many 2FA attempts. Please wait 5 minutes before trying again."}), 429
+        
     data = request.get_json(silent=True) or request.form
     code = data.get('code')
     
@@ -2458,6 +2622,13 @@ def login_2fa():
         
     totp = pyotp.TOTP(user['totp_secret'])
     if totp.verify(code):
+        # Clear rate limit on successful auth
+        r = get_redis()
+        if r:
+            try:
+                r.delete(f"rate_limit:2fa:{user_id}")
+            except redis.RedisError:
+                pass
         login_user(User(user['id'], user['username']))
         session.pop('pre_2fa_user_id', None)
         return jsonify({"success": True})
@@ -2485,6 +2656,19 @@ def change_password():
         
     if len(new_password) < 8:
         return jsonify({"error": "Password must be at least 8 characters"}), 400
+    
+    # Password complexity requirements
+    errors = []
+    if not re.search(r'[A-Z]', new_password):
+        errors.append("at least one uppercase letter")
+    if not re.search(r'[a-z]', new_password):
+        errors.append("at least one lowercase letter")
+    if not re.search(r'[0-9]', new_password):
+        errors.append("at least one number")
+    if not re.search(r'[!@#$%^&*(),.?\":{}|<>]', new_password):
+        errors.append("at least one special character (!@#$%^&*(),.?\":{}|<>)")
+    if errors:
+        return jsonify({"error": f"Password must contain {', '.join(errors)}"}), 400
         
     pwhash = generate_password_hash(new_password)
     try:
@@ -2639,8 +2823,20 @@ def setup_2fa_complete():
 @app.route('/auth/2fa/disable', methods=['POST'])
 @login_required
 def disable_2fa():
-    """Disable 2FA for current user."""
-    # In a production app, you might want to require a password/code check here
+    """Disable 2FA for current user. Requires password verification."""
+    data = request.get_json(silent=True) or request.form
+    password = data.get('password')
+    
+    if not password:
+        return jsonify({"error": "Password required to disable 2FA"}), 400
+    
+    user = db.get_user(current_user.id)
+    if not user or not user.get('password_hash'):
+        return jsonify({"error": "User account invalid"}), 400
+    
+    if not check_password_hash(user['password_hash'], password):
+        return jsonify({"error": "Incorrect password"}), 403
+    
     db.update_user_totp(current_user.id, None)
     return jsonify({"success": True})
 
@@ -2711,6 +2907,7 @@ ALLOWED_USER_SETTINGS = {
     'CF_API_TOKEN', 'CF_ZONE_ID', 'DOMAIN_ROOT', 'ORIGIN_RULE_NAME',
     'REDIS_HOST', 'REDIS_PORT', 'REDIS_PASS',
     'UNIFI_HOST', 'UNIFI_USER', 'UNIFI_PASS', 'UNIFI_RULE_NAME',
+    'UNIFI_VERIFY_SSL',
     'FIREWALL_TYPE', 'UNIFI_IP_GROUP_NAME', 'UNIFI_PORT_GROUP_NAME',
     'TRAEFIK_LAN_CIDR',
     'HEALTH_CHECK_INTERVAL', 'HEALTH_CHECK_TIMEOUT',
@@ -3393,17 +3590,17 @@ def api_reset_password(username):
     if not user:
         return jsonify({"error": "User not found"}), 404
         
-    # Generate random password
-    alphabet = string.ascii_letters + string.digits
+    # Generate random password meeting complexity requirements
+    alphabet = string.ascii_letters + string.digits + '!@#$%^&*'
     password = ''.join(secrets.choice(alphabet) for i in range(12))
     
     pwhash = generate_password_hash(password)
     try:
         db.update_user_password(user['id'], pwhash)
         print(f"\n🔐 PASSWORD RESET FOR USER: {username}")
-        print(f"   New Password: {password}")
-        print(f"   (This will only be shown once in the logs)\n")
-        return jsonify({"message": "Password reset successfully. Check logs for the new password."})
+        print(f"   New Password: {'*' * len(password)} (length={len(password)})")
+        print(f"   ⚠️ Password NOT logged for security. Return it to the admin via a secure channel.\n")
+        return jsonify({"message": "Password reset successfully. Check logs for the new password.", "password": password})
     except Exception as e:
         print(f"❌ Error resetting password: {e}")
         return jsonify({"error": "Failed to save password"}), 500
@@ -3454,12 +3651,20 @@ def api_restore_settings():
                  return jsonify({"error": "Invalid JSON format: expected a dictionary"}), 400
             
             count = 0
+            rejected_count = 0
             for key, value in data.items():
-                # Convert value to string as DB expects TEXT
+                if key not in ALLOWED_USER_SETTINGS:
+                    print(f"⚠️ Security: Rejected attempt to restore disallowed setting '{key}' via backup restore")
+                    rejected_count += 1
+                    continue
                 db.set_setting(key, str(value))
                 count += 1
             
-            return jsonify({"success": True, "message": f"Restored {count} settings successfully"})
+            msg = f"Restored {count} settings successfully"
+            if rejected_count > 0:
+                msg += f" ({rejected_count} sensitive settings were skipped)"
+            
+            return jsonify({"success": True, "message": msg})
         except json.JSONDecodeError:
             return jsonify({"error": "Invalid JSON file"}), 400
         except Exception as e:
@@ -3473,9 +3678,14 @@ def api_save_setting():
     if not data or 'key' not in data or 'value' not in data:
         return jsonify({"error": "Invalid request data"}), 400
     
+    key = data['key']
+    if key not in ALLOWED_USER_SETTINGS:
+        print(f"⚠️ Security: Rejected attempt to set disallowed setting '{key}' via API")
+        return jsonify({"error": "Setting not allowed to be modified via API"}), 403
+    
     try:
-        db.set_setting(data['key'], data['value'])
-        return jsonify({"message": f"Setting '{data['key']}' saved successfully"})
+        db.set_setting(key, data['value'])
+        return jsonify({"message": f"Setting '{key}' saved successfully"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3738,6 +3948,10 @@ try:
     mqtt_manager.start()
 except Exception as e:
     print(f"⚠️ Failed to start MQTT manager: {e}")
+
+# Register signal handlers for graceful shutdown
+signal.signal(signal.SIGTERM, request_shutdown)
+signal.signal(signal.SIGINT, request_shutdown)
 
 # Start background threads if running via Gunicorn/WSGI (imported module)
 if __name__ != "__main__":

@@ -93,7 +93,7 @@ PersistentKeepalive = 25
              # Try to clean up anyway if wg-quick fails (e.g. interface gone)
             try:
                 subprocess.check_call(['ip', 'link', 'del', 'wg0'])
-            except:
+            except (subprocess.CalledProcessError, FileNotFoundError):
                 pass
             return True, "Interface down (or already down)"
 
@@ -104,7 +104,7 @@ class VPSManager:
         user = db.get_setting('VPS_SSH_USER', 'root')
         try:
             port = int(db.get_setting('VPS_SSH_PORT', '22'))
-        except:
+        except (ValueError, TypeError):
             port = 22
         key_content = db.get_setting('VPS_SSH_KEY')
 
@@ -123,16 +123,16 @@ class VPSManager:
             # Try to load as RSA, then others if needed
             try:
                 k = paramiko.RSAKey.from_private_key_file(key_file.name)
-            except:
-                # Fallback for Ed25519 or others if supported by paramiko version
-                # But paramiko often needs specific class. 
-                # Let's try to infer or just let paramiko handle it if possible.
-                # For now, assume RSA or compatible.
-                # Actually, paramiko.SSHClient().connect() accepts key_filename!
+            except paramiko.SSHException:
                 k = None
 
             client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            # Use system known_hosts for host key verification
+            known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
+            if os.path.exists(known_hosts_path):
+                client.load_system_host_keys(known_hosts_path)
+            # Fall back to WarningPolicy if no known_hosts file exists
+            client.set_missing_host_key_policy(paramiko.WarningPolicy())
             
             if k:
                 client.connect(host, port=port, username=user, pkey=k, timeout=timeout)
@@ -189,7 +189,7 @@ class VPSManager:
             try:
                 client = VPSManager.get_ssh_client()
                 should_close = True
-            except:
+            except Exception:
                 return
 
         # Sanitization
@@ -221,7 +221,11 @@ class VPSManager:
         key_file.close()
         try:
             client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            # Use system known_hosts for host key verification
+            known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
+            if os.path.exists(known_hosts_path):
+                client.load_system_host_keys(known_hosts_path)
+            client.set_missing_host_key_policy(paramiko.WarningPolicy())
             client.connect(host, port=int(port), username=user, key_filename=key_file.name, timeout=5)
             client.close()
             return True, "Connection successful"
