@@ -69,14 +69,18 @@ class Tee(object):
             except Exception: pass
 
 LOG_FILE = os.path.join(DATA_DIR, 'app.log')
-# Truncate log file on startup and redirect stdout/stderr
+# Set up rotating log file and redirect stdout/stderr
 try:
-    with open(LOG_FILE, 'w', encoding='utf-8') as f:
-        f.write(f"--- Log Started at {time.ctime()} ---\n")
+    from logging.handlers import RotatingFileHandler
     
-    log_file_handle = open(LOG_FILE, 'a', encoding='utf-8')
-    sys.stdout = Tee(sys.stdout, log_file_handle)
-    sys.stderr = Tee(sys.stderr, log_file_handle)
+    log_rotator = RotatingFileHandler(
+        LOG_FILE, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'
+    )
+    # Write a startup marker
+    log_rotator.stream.write(f"--- Log Started at {time.ctime()} ---\n")
+    
+    sys.stdout = Tee(sys.stdout, log_rotator.stream)
+    sys.stderr = Tee(sys.stderr, log_rotator.stream)
 except Exception as e:
     print(f"⚠️ Failed to setup logging: {e}")
 
@@ -2436,12 +2440,12 @@ def login_begin():
     # Check if user exists
     user = db.get_user_by_username(username)
     if not user:
-        return jsonify({"error": "User not found"}), 404
+        return jsonify({"error": "Authentication failed"}), 400
     
     # Get user credentials
     credentials = db.get_credentials_for_user(user['id'])
     if not credentials:
-        return jsonify({"error": "No credentials found"}), 404
+        return jsonify({"error": "Authentication failed"}), 400
     
     # Get dynamic RP_ID and origin for this request
     rp_id = get_expected_rp_id()
@@ -2848,9 +2852,9 @@ def generate_recovery_codes():
     db.delete_all_recovery_codes(current_user.id)
     
     codes = []
-    # Generate 10 codes, 10 chars hex (20 chars total)
+    # Generate 10 codes, 16 chars hex (~64 bits entropy each)
     for _ in range(10):
-        code = secrets.token_hex(5)
+        code = secrets.token_hex(8)
         codes.append(code)
         # Hash and store
         db.add_recovery_code(current_user.id, generate_password_hash(code))
@@ -3954,11 +3958,10 @@ signal.signal(signal.SIGTERM, request_shutdown)
 signal.signal(signal.SIGINT, request_shutdown)
 
 # Start background threads if running via Gunicorn/WSGI (imported module)
+# Uses gthread worker with 1 worker + 4 threads for concurrent request handling.
+# Background threads are safe here since there's only one worker process.
 if __name__ != "__main__":
     try:
-        # Start background services when running under Gunicorn
-        # NOTE: This assumes a single worker process (default). 
-        # Multiple workers would duplicate health checks and notifications.
         start_health_check_thread()
         start_port_rotation_thread()
     except Exception as e:

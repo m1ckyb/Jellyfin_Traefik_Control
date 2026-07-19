@@ -295,7 +295,12 @@ function showDiagnosticsModal(diagnostics) {
         </div>`;
     }
     
-    content.innerHTML = html;
+    content.textContent = '';
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    while (doc.body.firstChild) {
+        content.appendChild(doc.body.firstChild);
+    }
     modal.style.display = 'block';
 }
 

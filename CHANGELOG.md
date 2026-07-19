@@ -33,6 +33,19 @@ All notable changes to this project will be documented in this file.
 - Networking: Added public IP caching (5-minute TTL) with lock-based thread safety.
 - Logging: Replaced all bare `except:` clauses across `main.py`, `routing.py`, and `mqtt_handler.py` with specific exception types.
 
+### DevOps
+- CI: Added GitHub Actions workflow (`ci.yml`) with ruff linting, bandit security scanning, and Docker build verification.
+- Docker: Added `HEALTHCHECK` instruction to Dockerfile (30s interval, 5s timeout, 10s start period).
+- Docker: Updated `.dockerignore` to exclude sensitive files (AUDIT/, SECURITY/, config.db, .secret_key, app.log, .env.*).
+- Logging: Replaced truncating log file with `RotatingFileHandler` (10MB max, 5 backups).
+- Gunicorn: Configured with 4 threads (`gthread` worker class), 120s timeout, 30s graceful shutdown, 5s keep-alive.
+
+### Fixed
+- Security: Added username enumeration prevention on `/auth/login/begin` (generic error messages).
+- Security: Increased recovery code entropy from 40-bit to 64-bit (`secrets.token_hex(8)`).
+- Frontend: Replaced `innerHTML` in diagnostics modal with safe DOM parsing to prevent XSS.
+- DevOps: Added placeholder values to `.env.example` to prevent accidental credential use.
+
 ## [0.1.2] - 2026-05-17
 
 ### Added

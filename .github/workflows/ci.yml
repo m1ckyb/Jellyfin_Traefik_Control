@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main", "dev" ]
+  pull_request:
+    branches: [ "main", "dev" ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install linting tools
+        run: pip install ruff bandit
+      - name: Lint with ruff
+        run: ruff check .
+      - name: Security scan with bandit
+        run: bandit -r . -ll --exclude ./.git,./__pycache__,./venv
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t routeghost:test .
+      - name: Verify container starts
+        run: |
+          docker run -d --name test -p 5001:5001 routeghost:test
+          sleep 5
+          docker ps | grep test
+          docker logs test 2>&1 | head -20
+          docker stop test && docker rm test

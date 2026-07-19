@@ -42,4 +42,12 @@ fi
 
 # Run the application
 echo "[$(date '+%Y-%m-%d %H:%M:%S %z')] 👻 RouteGhost: Starting application..."
-exec su-exec appuser:appgroup gunicorn --bind 0.0.0.0:5001 main:app
+exec su-exec appuser:appgroup gunicorn \
+  --bind 0.0.0.0:5001 \
+  --workers 1 \
+  --threads 4 \
+  --worker-class gthread \
+  --timeout 120 \
+  --graceful-timeout 30 \
+  --keep-alive 5 \
+  main:app
