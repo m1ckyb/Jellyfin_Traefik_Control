@@ -7,6 +7,8 @@ import string
 import os
 import sys
 import builtins
+import logging
+import uuid
 import urllib3
 from urllib.parse import urlparse
 import json
@@ -20,6 +22,7 @@ import socket
 import re
 from functools import wraps
 from dotenv import load_dotenv
+from logging_config import setup_logging, get_logger
 from flask import Flask, jsonify, render_template, request, redirect, url_for, flash, session, has_request_context, make_response, g
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -119,6 +122,11 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Initialize database
 db.init_db()
+
+# Initialize structured logging
+setup_logging(log_dir=DATA_DIR)
+
+logger = get_logger("routeghost")
 
 # Constants
 # Settings are now stored in database and configured via web UI
@@ -545,7 +553,7 @@ def check_rate_limit_redis(key_prefix, identifier, limit=5, window=60):
         
         return True
     except Exception as e:
-        print(f"⚠️ Redis rate limit error: {e}, falling back to in-memory")
+        logger.warning("Redis rate limit error: %s, falling back to in-memory", e)
         return check_rate_limit(f"{key_prefix}:{identifier}", limit, window)
 
 def check_2fa_rate_limit(identifier, limit=5, window=300):
@@ -1348,7 +1356,7 @@ def perform_health_check():
                         del HEALTH_STATUS_CACHE[service['id']]
         return True
     except Exception as e:
-        print(f"⚠️ Health check error: {e}")
+        logger.warning("Health check error: %s", e)
         return False
 
 def health_check_loop():
@@ -1385,7 +1393,7 @@ def port_rotation_loop():
             else:
                 _shutdown_event.wait(timeout=60)
         except Exception as e:
-            print(f"⚠️ Port rotation error: {e}")
+            logger.warning("Port rotation error: %s", e)
             _shutdown_event.wait(timeout=60)
 
 def start_port_rotation_thread():
@@ -2115,6 +2123,33 @@ def add_security_headers(response):
     )
     return response
 
+@app.after_request
+def log_request(response):
+    """Log every request with status code and add X-Request-ID header."""
+    import time as _time
+    request_id = getattr(g, "request_id", None)
+    if request_id:
+        response.headers["X-Request-ID"] = request_id
+    if not request.path.startswith('/static'):
+        duration = _time.monotonic() - getattr(g, '_request_start_time', _time.monotonic())
+        log_level = logging.WARNING if response.status_code >= 400 else logging.INFO
+        logger.log(
+            log_level,
+            "%s %s -> %s (%.3fs)",
+            request.method,
+            request.path,
+            response.status_code,
+            duration,
+        )
+    return response
+
+@app.before_request
+def start_request_timer():
+    """Record request start time and assign a request ID for logging."""
+    import time as _time
+    g._request_start_time = _time.monotonic()
+    g.request_id = uuid.uuid4().hex[:8]
+
 # Use persistent secret key from environment or generate one and store it
 SECRET_KEY_FILE = os.path.join(DATA_DIR, '.secret_key')
 if os.path.exists(SECRET_KEY_FILE):
@@ -2382,7 +2417,7 @@ def register_complete():
         if not username: missing.append('username')
         if not rp_id: missing.append('rp_id')
         if not origin: missing.append('origin')
-        print(f"⚠️ Registration failed: Missing session data: {', '.join(missing)}")
+        logger.warning("Registration failed: Missing session data: %s", ', '.join(missing))
         # Return generic error to client
         return jsonify({"error": "Invalid or expired session. Please try again."}), 400
     
@@ -2493,7 +2528,7 @@ def login_complete():
         if not user_id: missing.append('user_id')
         if not rp_id: missing.append('rp_id')
         if not origin: missing.append('origin')
-        print(f"⚠️ Authentication failed: Missing session data: {', '.join(missing)}")
+        logger.warning("Authentication failed: Missing session data: %s", ', '.join(missing))
         # Return generic error to client
         return jsonify({"error": "Invalid or expired session. Please try again."}), 400
     
@@ -2509,7 +2544,7 @@ def login_complete():
         db_credential = db.get_credential_by_id(cred_id_hex)
         
         if not db_credential or db_credential['user_id'] != user_id:
-            print(f"⚠️ Credential lookup failed: cred_id_hex={cred_id_hex}, db_credential={db_credential}")
+            logger.warning("Credential lookup failed: cred_id_hex=%s, db_credential=%s", cred_id_hex, db_credential)
             return jsonify({"error": "Invalid credential"}), 400
         
         # Verify the authentication response
@@ -2938,7 +2973,7 @@ def onboarding_complete():
                 db.set_setting(key, request.form[key])
                 saved_count += 1
             else:
-                print(f"⚠️ Security: Rejected attempt to set disallowed setting '{key}' via onboarding")
+                logger.warning("Security: Rejected attempt to set disallowed setting '%s' via onboarding", key)
                 rejected_count += 1
         
         # Mark onboarding as completed
@@ -3084,7 +3119,7 @@ def settings():
                         mqtt_changed = True
                     saved_count += 1
                 else:
-                    print(f"⚠️ Security: Rejected attempt to set disallowed setting '{key}' via settings page")
+                    logger.warning("Security: Rejected attempt to set disallowed setting '%s' via settings page", key)
                     rejected_count += 1
             
             if mqtt_changed:
@@ -3151,6 +3186,52 @@ def settings():
                           db_size=db_size_str)
 
 # API Routes
+@app.route('/healthz', methods=['GET'])
+def health_check():
+    """Health check endpoint for load balancers, Docker, and monitoring.
+
+    Returns 200 with component status, or 503 if critical components are down.
+    No authentication required (for infrastructure probes).
+    """
+    health = {"status": "healthy"}
+    overall_healthy = True
+
+    # Database connectivity
+    try:
+        with db.get_db() as conn:
+            conn.execute("SELECT 1")
+        health["database"] = "ok"
+    except Exception as e:
+        health["database"] = f"error: {e}"
+        overall_healthy = False
+
+    # Redis connectivity
+    r = get_redis()
+    if r:
+        try:
+            r.ping()
+            health["redis"] = "ok"
+        except Exception as e:
+            health["redis"] = f"error: {e}"
+            # Redis is non-critical; don't fail the health check
+    else:
+        health["redis"] = "unavailable"
+
+    # MQTT status
+    if mqtt_manager:
+        if mqtt_manager.client:
+            try:
+                health["mqtt"] = "connected" if mqtt_manager.client.is_connected() else "disconnected"
+            except Exception:
+                health["mqtt"] = "error"
+        else:
+            health["mqtt"] = "not_connected"
+
+    health["status"] = "healthy" if overall_healthy else "degraded"
+    status_code = 200 if overall_healthy else 503
+
+    return jsonify(health), status_code
+
 @app.route('/api/status', methods=['GET'])
 @api_key_or_login_required
 def api_status():
@@ -3658,7 +3739,7 @@ def api_restore_settings():
             rejected_count = 0
             for key, value in data.items():
                 if key not in ALLOWED_USER_SETTINGS:
-                    print(f"⚠️ Security: Rejected attempt to restore disallowed setting '{key}' via backup restore")
+                    logger.warning("Security: Rejected attempt to restore disallowed setting '%s' via backup restore", key)
                     rejected_count += 1
                     continue
                 db.set_setting(key, str(value))
@@ -3684,7 +3765,7 @@ def api_save_setting():
     
     key = data['key']
     if key not in ALLOWED_USER_SETTINGS:
-        print(f"⚠️ Security: Rejected attempt to set disallowed setting '{key}' via API")
+        logger.warning("Security: Rejected attempt to set disallowed setting '%s' via API", key)
         return jsonify({"error": "Setting not allowed to be modified via API"}), 403
     
     try:

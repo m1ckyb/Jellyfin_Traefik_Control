@@ -32,6 +32,8 @@ All notable changes to this project will be documented in this file.
 - Graceful Shutdown: Added signal handler for `SIGTERM`/`SIGINT` that sets a shutdown event; all background loops now exit cleanly.
 - Networking: Added public IP caching (5-minute TTL) with lock-based thread safety.
 - Logging: Replaced all bare `except:` clauses across `main.py`, `routing.py`, and `mqtt_handler.py` with specific exception types.
+- Logging: Added structured logging module (`logging_config.py`) with `RotatingFileHandler`, request ID tracking, and `X-Request-ID` response header.
+- Monitoring: Added `/healthz` endpoint (unauthenticated) returning database, Redis, and MQTT component health with HTTP 200/503.
 
 ### DevOps
 - CI: Added GitHub Actions workflow (`ci.yml`) with ruff linting, bandit security scanning, and Docker build verification.
@@ -39,6 +41,10 @@ All notable changes to this project will be documented in this file.
 - Docker: Updated `.dockerignore` to exclude sensitive files (AUDIT/, SECURITY/, config.db, .secret_key, app.log, .env.*).
 - Logging: Replaced truncating log file with `RotatingFileHandler` (10MB max, 5 backups).
 - Gunicorn: Configured with 4 threads (`gthread` worker class), 120s timeout, 30s graceful shutdown, 5s keep-alive.
+
+### Testing
+- Added 88 unit and integration tests across `test_auth.py`, `test_settings.py`, and `test_services.py`.
+- Tests cover: login/2FA/recovery, password complexity, CSRF bypass, settings whitelist enforcement, service CRUD/enable/disable, and health check endpoint.
 
 ### Fixed
 - Security: Added username enumeration prevention on `/auth/login/begin` (generic error messages).
