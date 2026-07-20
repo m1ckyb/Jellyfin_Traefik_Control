@@ -29,6 +29,7 @@ COPY --chown=appuser:appgroup main.py .
 COPY --chown=appuser:appgroup database.py .
 COPY --chown=appuser:appgroup routing.py .
 COPY --chown=appuser:appgroup mqtt_handler.py .
+COPY --chown=appuser:appgroup logging_config.py .
 COPY --chown=appuser:appgroup VERSION.txt .
 COPY --chown=appuser:appgroup templates templates/
 COPY --chown=appuser:appgroup static static/
@@ -42,5 +43,5 @@ VOLUME /app/data
 
 # Use entrypoint script to fix permissions and start the app
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://localhost:5001/ || exit 1
+  CMD wget -qO- http://localhost:5001/healthz || exit 1
 ENTRYPOINT ["/app/entrypoint.sh"]
