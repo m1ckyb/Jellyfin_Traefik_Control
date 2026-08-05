@@ -43,5 +43,5 @@ VOLUME /app/data
 
 # Use entrypoint script to fix permissions and start the app
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD wget -qO- http://localhost:5001/healthz || exit 1
+  CMD wget -qO- http://127.0.0.1:5001/healthz || exit 1
 ENTRYPOINT ["/app/entrypoint.sh"]
