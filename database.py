@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import sqlite3
-import json
 import os
 from contextlib import contextmanager
 

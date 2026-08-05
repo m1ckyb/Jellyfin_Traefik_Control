@@ -1,6 +1,5 @@
 import json
 import threading
-import time
 import paho.mqtt.client as mqtt
 import database as db
 

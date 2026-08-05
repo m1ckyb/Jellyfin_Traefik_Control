@@ -3,7 +3,6 @@ import subprocess
 import paramiko
 import tempfile
 import database as db
-import time
 import shlex
 
 def get_routing_mode(service=None):
@@ -20,7 +19,8 @@ class WireGuardManager:
         # or weird characters inject extra config lines.
         
         def clean(value):
-            if not value: return ""
+            if not value:
+                return ""
             return value.replace('\n', '').replace('\r', '').strip()
 
         private_key = clean(db.get_setting('WG_PRIVATE_KEY'))

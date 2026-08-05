@@ -2,14 +2,10 @@
 """Unit tests for authentication flows in RouteGhost."""
 import os
 import sys
-import time
-import secrets
 import tempfile
 import shutil
-from unittest.mock import patch, MagicMock
 
 import pytest
-from werkzeug.security import generate_password_hash, check_password_hash
 
 # Ensure the app directory is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -350,7 +346,7 @@ class TestRecoveryCodes:
             sess["_user_id"] = str(user_id)
 
         # Use the app's generate endpoint
-        resp = client.post("/auth/2fa/recovery-codes/generate")
+        client.post("/auth/2fa/recovery-codes/generate")
         # This may require login, test the codes directly
         from main import secrets as _secrets
         code = _secrets.token_hex(8)

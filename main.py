@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import json
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import base64
 import hashlib
 import ipaddress
@@ -57,7 +57,7 @@ from mqtt_handler import mqtt_manager
 from database import DATA_DIR
 
 # --- LOGGING SETUP ---
-class Tee(object):
+class Tee:
     def __init__(self, *files):
         self.files = files
     def write(self, obj):
@@ -65,11 +65,14 @@ class Tee(object):
             try:
                 f.write(obj)
                 f.flush()
-            except Exception: pass
+            except Exception:
+                pass
     def flush(self):
         for f in self.files:
-            try: f.flush()
-            except Exception: pass
+            try:
+                f.flush()
+            except Exception:
+                pass
 
 LOG_FILE = os.path.join(DATA_DIR, 'app.log')
 # Set up rotating log file and redirect stdout/stderr
@@ -679,7 +682,7 @@ def cf_request(method, endpoint, data=None, timeout=15):
     cf_zone_id = get_setting("CF_ZONE_ID")
     
     if not cf_token or not cf_zone_id:
-        print(f"❌ Cloudflare settings not configured")
+        print("❌ Cloudflare settings not configured")
         return None
     
     headers = {
@@ -790,8 +793,10 @@ def sync_unifi_groups(session=None, base_url=None):
                 
                 # Default ports
                 if not port:
-                    if parsed.scheme == 'http': port = 80
-                    elif parsed.scheme == 'https': port = 443
+                    if parsed.scheme == 'http':
+                        port = 80
+                    elif parsed.scheme == 'https':
+                        port = 443
                 
                 if hostname and port:
                     # Resolve hostname to IP
@@ -1203,7 +1208,8 @@ def toggle_unifi(enable_rule, forward_port=None, session=None, base_url=None):
             resp = login_unifi_with_retry(session, base_url, unifi_user, unifi_pass)
             
             if not resp or resp.status_code != 200:
-                if resp: print(f"❌ UniFi Login Failed: HTTP {resp.status_code}")
+                if resp:
+                    print(f"❌ UniFi Login Failed: HTTP {resp.status_code}")
                 return False
                 
             csrf_token = resp.headers.get("x-csrf-token")
@@ -1248,7 +1254,7 @@ def toggle_unifi(enable_rule, forward_port=None, session=None, base_url=None):
             print(f"   Updating WAN port: {old_port} → {forward_port}")
     
     if not changes:
-        print(f"   UniFi rule is already configured correctly.")
+        print("   UniFi rule is already configured correctly.")
         return True
 
     try:
@@ -1328,7 +1334,7 @@ def send_discord_notification(message, title=None, color=None, webhook_url=None,
     if not webhook_url:
         return
 
-    version = get_version()
+    get_version()
 
     embed = {
         "description": message,
@@ -1399,7 +1405,8 @@ def health_check_loop():
         except (ValueError, TypeError):
             interval = 60
             
-        if interval < 10: interval = 10
+        if interval < 10:
+            interval = 10
         
         perform_health_check()
         
@@ -1673,7 +1680,7 @@ def _turn_off_service_inner(service, actor=None, quiet=False, skip_unifi=False):
                     cf_request("DELETE", f"rulesets/{ruleset_id}/rules/{target_rule['id']}")
                     print(f"   Deleted Origin Rule as no services are active: {origin_rule_name}")
             else:
-                print(f"   No Origin Rule found to clean up.")
+                print("   No Origin Rule found to clean up.")
 
     # Update database - clear hostname and port
     db.update_service_status(service_id, False, None, None)
@@ -1731,7 +1738,8 @@ def _rotate_firewall_port_inner(actor=None):
                 unifi_session.headers.update({"X-CSRF-Token": csrf_token})
     
     if not toggle_unifi(True, new_port, session=unifi_session, base_url=unifi_base_url):
-        if unifi_session: logout_unifi(unifi_session, unifi_base_url)
+        if unifi_session:
+            logout_unifi(unifi_session, unifi_base_url)
         return {"error": "Failed to update UniFi firewall"}
 
     # 4. Update Cloudflare Origin Rule
@@ -2001,7 +2009,7 @@ def _turn_on_service_inner(service, force=False, actor=None, preferred_port=None
                 if result:
                     print(f"   Created new Origin Rule: {origin_rule_name}")
                 else:
-                    print(f"   ⚠️ Warning: Failed to create Origin Rule")
+                    print("   ⚠️ Warning: Failed to create Origin Rule")
 
 
     # Only clean up old random records if we are in random mode
@@ -2114,7 +2122,6 @@ app.config['WTF_CSRF_CHECK_DEFAULT'] = False # We will manually check to exempt 
 csrf = CSRFProtect(app)
 
 # Session security configuration
-from datetime import timedelta
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
@@ -2211,7 +2218,7 @@ try:
         print(f"⚠️ SETUP_WINDOW_SECONDS={SETUP_WINDOW_SECONDS} is outside recommended range (60-3600). Using default 300.")
         SETUP_WINDOW_SECONDS = 300
 except ValueError:
-    print(f"⚠️ Invalid SETUP_WINDOW_SECONDS value. Using default 300.")
+    print("⚠️ Invalid SETUP_WINDOW_SECONDS value. Using default 300.")
     SETUP_WINDOW_SECONDS = 300
 
 def is_in_setup_window():
@@ -2450,10 +2457,14 @@ def register_complete():
     if not challenge or not username or not rp_id or not origin:
         # Log what's missing for debugging (server-side only)
         missing = []
-        if not challenge: missing.append('challenge')
-        if not username: missing.append('username')
-        if not rp_id: missing.append('rp_id')
-        if not origin: missing.append('origin')
+        if not challenge:
+            missing.append('challenge')
+        if not username:
+            missing.append('username')
+        if not rp_id:
+            missing.append('rp_id')
+        if not origin:
+            missing.append('origin')
         logger.warning("Registration failed: Missing session data: %s", ', '.join(missing))
         # Return generic error to client
         return jsonify({"error": "Invalid or expired session. Please try again."}), 400
@@ -2561,10 +2572,14 @@ def login_complete():
     if not challenge or not user_id or not rp_id or not origin:
         # Log what's missing for debugging (server-side only)
         missing = []
-        if not challenge: missing.append('challenge')
-        if not user_id: missing.append('user_id')
-        if not rp_id: missing.append('rp_id')
-        if not origin: missing.append('origin')
+        if not challenge:
+            missing.append('challenge')
+        if not user_id:
+            missing.append('user_id')
+        if not rp_id:
+            missing.append('rp_id')
+        if not origin:
+            missing.append('origin')
         logger.warning("Authentication failed: Missing session data: %s", ', '.join(missing))
         # Return generic error to client
         return jsonify({"error": "Invalid or expired session. Please try again."}), 400
@@ -3547,7 +3562,7 @@ def api_diagnose_service(service_id):
         if parsed_url.scheme not in ['http', 'https']:
             diagnostics["checks"]["backend_host"] = {
                 "status": "info",
-                "message": f"Skipping connectivity check for non-HTTP(S) URL",
+                "message": "Skipping connectivity check for non-HTTP(S) URL",
                 "target": target_url
             }
         else:
@@ -3731,7 +3746,7 @@ def api_reset_password(username):
         db.update_user_password(user['id'], pwhash)
         print(f"\n🔐 PASSWORD RESET FOR USER: {username}")
         print(f"   New Password: {'*' * len(password)} (length={len(password)})")
-        print(f"   ⚠️ Password NOT logged for security. Return it to the admin via a secure channel.\n")
+        print("   ⚠️ Password NOT logged for security. Return it to the admin via a secure channel.\n")
         return jsonify({"message": "Password reset successfully. Check logs for the new password.", "password": password})
     except Exception as e:
         print(f"❌ Error resetting password: {e}")
