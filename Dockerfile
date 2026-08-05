@@ -42,6 +42,6 @@ RUN chmod +x /app/entrypoint.sh
 VOLUME /app/data
 
 # Use entrypoint script to fix permissions and start the app
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD wget -qO- http://localhost:5001/healthz || exit 1
 ENTRYPOINT ["/app/entrypoint.sh"]
