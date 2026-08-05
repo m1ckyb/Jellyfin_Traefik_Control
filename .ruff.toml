@@ -1,0 +1,10 @@
+# Ruff configuration file
+# Pin standard pycodestyle and pyflakes rules to maintain consistent and deterministic linting behavior
+
+[lint]
+select = [
+    "E4",  # Import formatting/structure
+    "E7",  # Statement/expression conventions
+    "E9",  # Syntax errors
+    "F",   # Pyflakes (unused imports, variables, undefined names, etc.)
+]
