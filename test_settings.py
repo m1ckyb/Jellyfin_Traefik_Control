@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Unit tests for settings endpoints in RouteGhost."""
 import io
 import json

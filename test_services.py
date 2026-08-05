@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Integration tests for service CRUD, enable/disable, and API endpoints."""
 import hashlib
 import os
