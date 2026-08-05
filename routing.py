@@ -139,6 +139,23 @@ class VPSManager:
             else:
                 client.connect(host, port=port, username=user, key_filename=key_file.name, timeout=timeout)
                 
+            # Trust-On-First-Use (TOFU) host key verification
+            try:
+                remote_key = client.get_transport().get_remote_server_key()
+                import binascii
+                fingerprint = binascii.hexlify(remote_key.get_fingerprint()).decode()
+                stored_fingerprint = db.get_setting("VPS_SSH_HOST_KEY")
+                if stored_fingerprint:
+                    if fingerprint != stored_fingerprint:
+                        client.close()
+                        raise Exception(f"Host key verification failed! Host key has changed. Stored: {stored_fingerprint}, Server: {fingerprint}")
+                else:
+                    db.set_setting("VPS_SSH_HOST_KEY", fingerprint)
+            except Exception as ex:
+                if "Host key verification failed" in str(ex):
+                    raise
+                pass
+                
             return client
         finally:
             os.unlink(key_file.name)
@@ -204,12 +221,12 @@ class VPSManager:
         for rule in rules:
             if "-A " in rule and "DNAT" in rule:
                 # Convert Add rule to Delete rule
-                # iptables-save output is trusted (from system), but we should be careful executing it back.
-                # However, rule comes from iptables-save, so it's formatted correctly.
-                # We just replace -A with -D.
-                del_cmd = rule.replace("-A ", "-D ")
+                import re
+                del_cmd = rule.replace("-A ", "-D ").strip()
                 cmd = f"iptables -t nat {del_cmd}"
-                client.exec_command(cmd)
+                # Ensure the command only contains standard characters and conforms to a standard iptables DNAT structure
+                if re.match(r"^iptables -t nat -D [A-Z_]+ -p tcp( -m tcp)? --dport \d+ -j DNAT --to-destination [\d\.:]+$", cmd):
+                    client.exec_command(cmd)
         
         if should_close:
             client.close()
@@ -227,6 +244,24 @@ class VPSManager:
                 client.load_system_host_keys(known_hosts_path)
             client.set_missing_host_key_policy(paramiko.WarningPolicy())
             client.connect(host, port=int(port), username=user, key_filename=key_file.name, timeout=5)
+            
+            # Trust-On-First-Use (TOFU) host key verification
+            try:
+                remote_key = client.get_transport().get_remote_server_key()
+                import binascii
+                fingerprint = binascii.hexlify(remote_key.get_fingerprint()).decode()
+                stored_fingerprint = db.get_setting("VPS_SSH_HOST_KEY")
+                if stored_fingerprint:
+                    if fingerprint != stored_fingerprint:
+                        client.close()
+                        return False, f"Host key verification failed! Host key has changed. Stored: {stored_fingerprint}, Server: {fingerprint}"
+                else:
+                    db.set_setting("VPS_SSH_HOST_KEY", fingerprint)
+            except Exception as ex:
+                if "Host key verification failed" in str(ex):
+                    client.close()
+                    return False, str(ex)
+            
             client.close()
             return True, "Connection successful"
         except Exception as e:

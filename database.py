@@ -285,6 +285,12 @@ def set_setting(key, value):
         """, (key, value, value))
         conn.commit()
 
+def delete_setting(key):
+    """Delete a setting."""
+    with get_db() as conn:
+        conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        conn.commit()
+
 def get_all_settings():
     """Get all settings as a dictionary."""
     with get_db() as conn:

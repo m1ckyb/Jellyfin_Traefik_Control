@@ -500,17 +500,21 @@ LOGIN_ATTEMPTS = {}
 def check_rate_limit(ip_address, limit=5, window=60):
     """Simple in-memory rate limiting (fallback when Redis unavailable)."""
     current_time = time.time()
+    
+    # Evict stale/expired entries to prevent memory leak
+    if len(LOGIN_ATTEMPTS) > 5000:
+        stale_ips = [ip for ip, ts in LOGIN_ATTEMPTS.items() if not ts or current_time - ts[-1] >= window]
+        for ip in stale_ips:
+            del LOGIN_ATTEMPTS[ip]
+        # Hard cap to prevent memory bloat if under high concurrent attacks
+        if len(LOGIN_ATTEMPTS) > 5000:
+            LOGIN_ATTEMPTS.clear()
+            
     if ip_address not in LOGIN_ATTEMPTS:
         LOGIN_ATTEMPTS[ip_address] = []
     
     # Filter out timestamps older than the window
     LOGIN_ATTEMPTS[ip_address] = [t for t in LOGIN_ATTEMPTS[ip_address] if current_time - t < window]
-    
-    # Evict stale IPs to prevent memory leak (keep at most 10000 entries)
-    if len(LOGIN_ATTEMPTS) > 10000:
-        stale_ips = [ip for ip, ts in LOGIN_ATTEMPTS.items() if not ts]
-        for ip in stale_ips[:5000]:
-            del LOGIN_ATTEMPTS[ip]
     
     # Check if limit reached
     if len(LOGIN_ATTEMPTS[ip_address]) >= limit:
@@ -1265,8 +1269,34 @@ def toggle_unifi(enable_rule, forward_port=None, session=None, base_url=None):
         if own_session:
             logout_unifi(session, base_url)
 
-# Default Cloudflare Origin Rule action type
-DEFAULT_ORIGIN_ACTION = "route"
+_last_backup_time = 0
+
+def backup_database():
+    """Create a backup of the SQLite database using SQLite's backup API."""
+    import sqlite3
+    try:
+        backup_path = os.path.join(DATA_DIR, "config.db.bak")
+        with db.get_db() as conn:
+            # We connect to backup file and backup the connection
+            bck = sqlite3.connect(backup_path)
+            with bck:
+                conn.backup(bck)
+            bck.close()
+        logger.info("Database backup created successfully at %s", backup_path)
+        # Ensure backup file is owned and permissioned correctly (read/write only by owner)
+        if os.path.exists(backup_path):
+            os.chmod(backup_path, 0o600)
+            try:
+                # Appuser should own it since app runs as appuser
+                uid = int(os.environ.get('PUID', 1000))
+                gid = int(os.environ.get('PGID', 1000))
+                os.chown(backup_path, uid, gid)
+            except Exception:
+                pass
+        return True
+    except Exception as e:
+        logger.error("Failed to create database backup: %s", e)
+        return False
 
 def check_service_health(target_url, timeout=None):
     """Check if service target is reachable."""
@@ -1362,6 +1392,7 @@ def perform_health_check():
 def health_check_loop():
     """Background loop to check service health periodically."""
     print("🔹 Starting background health check service...")
+    global _last_backup_time
     while not _shutdown_event.is_set():
         try:
             interval = int(get_setting("HEALTH_CHECK_INTERVAL", required=False) or 60)
@@ -1372,6 +1403,12 @@ def health_check_loop():
         
         perform_health_check()
         
+        # Daily database backup
+        now = time.time()
+        if now - _last_backup_time >= 86400:
+            backup_database()
+            _last_backup_time = now
+            
         _shutdown_event.wait(timeout=interval)
 
 def start_health_check_thread():
@@ -2970,7 +3007,12 @@ def onboarding_complete():
         rejected_count = 0
         for key in request.form:
             if key in ALLOWED_USER_SETTINGS:
-                db.set_setting(key, request.form[key])
+                value = request.form[key]
+                old_value = db.get_setting(key)
+                if old_value != value and key in ['VPS_HOST', 'VPS_SSH_KEY', 'VPS_SSH_PORT']:
+                    db.delete_setting('VPS_SSH_HOST_KEY')
+                    logger.info("Cleared VPS_SSH_HOST_KEY due to VPS config change during onboarding.")
+                db.set_setting(key, value)
                 saved_count += 1
             else:
                 logger.warning("Security: Rejected attempt to set disallowed setting '%s' via onboarding", key)
@@ -3113,6 +3155,11 @@ def settings():
                         if ':' not in value:
                             flash(f'Error saving {key}: Must be in IP:Port format', 'error')
                             continue
+
+                    old_value = db.get_setting(key)
+                    if old_value != value and key in ['VPS_HOST', 'VPS_SSH_KEY', 'VPS_SSH_PORT']:
+                        db.delete_setting('VPS_SSH_HOST_KEY')
+                        logger.info("Cleared VPS_SSH_HOST_KEY due to VPS config change.")
 
                     db.set_setting(key, value)
                     if key.startswith("MQTT_"):
