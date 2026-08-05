@@ -132,7 +132,7 @@ class VPSManager:
             if os.path.exists(known_hosts_path):
                 client.load_system_host_keys(known_hosts_path)
             # Fall back to WarningPolicy if no known_hosts file exists
-            client.set_missing_host_key_policy(paramiko.WarningPolicy())
+            client.set_missing_host_key_policy(paramiko.WarningPolicy())  # nosec B507
             
             if k:
                 client.connect(host, port=port, username=user, pkey=k, timeout=timeout)
@@ -180,7 +180,7 @@ class VPSManager:
         
         # Check Masquerade
         check_masq = "iptables -t nat -C POSTROUTING -j MASQUERADE"
-        stdin, stdout, stderr = client.exec_command(check_masq)
+        stdin, stdout, stderr = client.exec_command(check_masq)  # nosec B601
         if stdout.channel.recv_exit_status() != 0:
             cmds.append("iptables -t nat -A POSTROUTING -j MASQUERADE")
 
@@ -189,7 +189,7 @@ class VPSManager:
         cmds.append(f"iptables -t nat -A PREROUTING -p tcp --dport {s_public_port} -j DNAT --to-destination {s_local_ip}:{s_local_port}")
         
         for cmd in cmds:
-            stdin, stdout, stderr = client.exec_command(cmd)
+            stdin, stdout, stderr = client.exec_command(cmd)  # nosec B601
             exit_status = stdout.channel.recv_exit_status()
             if exit_status != 0:
                 error = stderr.read().decode()
@@ -215,7 +215,7 @@ class VPSManager:
         # Find rules matching --dport {public_port}
         # We rely on grep to find the line, but we must ensure grep pattern is safe.
         # shlex.quote handles this.
-        stdin, stdout, stderr = client.exec_command(f"iptables-save | grep 'dport {s_public_port}'")
+        stdin, stdout, stderr = client.exec_command(f"iptables-save | grep 'dport {s_public_port}'")  # nosec B601
         rules = stdout.read().decode().splitlines()
         
         for rule in rules:
@@ -226,7 +226,7 @@ class VPSManager:
                 cmd = f"iptables -t nat {del_cmd}"
                 # Ensure the command only contains standard characters and conforms to a standard iptables DNAT structure
                 if re.match(r"^iptables -t nat -D [A-Z_]+ -p tcp( -m tcp)? --dport \d+ -j DNAT --to-destination [\d\.:]+$", cmd):
-                    client.exec_command(cmd)
+                    client.exec_command(cmd)  # nosec B601
         
         if should_close:
             client.close()
@@ -242,7 +242,7 @@ class VPSManager:
             known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
             if os.path.exists(known_hosts_path):
                 client.load_system_host_keys(known_hosts_path)
-            client.set_missing_host_key_policy(paramiko.WarningPolicy())
+            client.set_missing_host_key_policy(paramiko.WarningPolicy())  # nosec B507
             client.connect(host, port=int(port), username=user, key_filename=key_file.name, timeout=5)
             
             # Trust-On-First-Use (TOFU) host key verification

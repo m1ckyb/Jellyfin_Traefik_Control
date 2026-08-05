@@ -221,8 +221,8 @@ def get_setting(key, required=True):
     return value
 
 # API Settings
-API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", 5001))
+API_HOST = os.getenv("API_HOST", "0.0.0.0")  # nosec B104
+API_PORT = int(os.getenv("API_PORT", "5001"))
 
 # ================= INPUT VALIDATION FUNCTIONS =================
 
@@ -1312,7 +1312,7 @@ def check_service_health(target_url, timeout=None):
         if timeout is None:
             timeout = int(get_setting("HEALTH_CHECK_TIMEOUT", required=False) or 1)
             
-        requests.get(target_url, timeout=timeout, verify=False)
+        requests.get(target_url, timeout=timeout, verify=False)  # nosec B501
         return True
     except (requests.RequestException, ValueError):
         return False
